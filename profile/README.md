@@ -2,8 +2,6 @@
   <img src="https://raw.githubusercontent.com/Nox-HQ/.github/main/profile/nox-logo.png" alt="NOX" width="280" />
 </p>
 
-<h1 align="center">NOX</h1>
-
 <p align="center">
   <strong>Surface what hides in the dark.</strong><br/>
   Open-source, language-agnostic security engine for codebases, supply chains, runtime systems, and AI applications.
