@@ -103,6 +103,7 @@ jobs:
           # directory exhausts.
           GITHUB_TOKEN: ${{ secrets.NOX_TOKEN || secrets.GITHUB_TOKEN }}
           INCLUDE_MAJOR: ${{ inputs.include-major }}
+          HAVE_NOX_TOKEN: ${{ secrets.NOX_TOKEN != '' }}
         run: |
           # Scan output goes to RUNNER_TEMP, never the working tree.
           #
@@ -121,7 +122,26 @@ jobs:
           nox scan . -format json -output "$out" || true
           major=""
           [ "$INCLUDE_MAJOR" = "true" ] && major="--include-major"
-          nox fix --actions $major --input "$out/findings.json" --root . || true
+
+          # Only attempt action-pin remediation when a token that can PUSH it
+          # exists. Running --actions without NOX_TOKEN rewrites files under
+          # .github/workflows and the push is then rejected outright:
+          #
+          #   ! [remote rejected] refusing to allow a GitHub App to create or
+          #     update workflow `.github/workflows/ci.yml` without `workflows`
+          #     permission
+          #
+          # so the whole run fails and the dependency upgrades it did find are
+          # thrown away with it. Skipping the pass keeps that half working, and
+          # says so rather than quietly narrowing what was scanned.
+          actions=""
+          if [ "$HAVE_NOX_TOKEN" = "true" ]; then
+            actions="--actions"
+          else
+            echo "nox: NOX_TOKEN not set — remediating dependencies only." >&2
+            echo "nox: GitHub Action pins are left untouched; GITHUB_TOKEN cannot push workflow file changes." >&2
+          fi
+          nox fix $actions $major --input "$out/findings.json" --root . || true
           [ -f go.mod ] && go mod tidy || true
 
       - name: Verify
