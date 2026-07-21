@@ -1,0 +1,153 @@
+# Reusable Nox Remediate — dependency + GitHub Actions remediation in one place.
+#
+# Replaces Dependabot's "open a PR with the version bump" loop, and goes past it:
+# nox also SHA-pins mutable action refs (@v1, @main), which Dependabot never
+# does. One scan, one `nox fix`, one PR.
+#
+# Ported from klarlabs-studio/.github, where this pattern already runs across
+# 20+ repositories. The one addition is the verify step: a remediation PR that
+# has not been tested is a PR a reviewer has to test by hand.
+#
+# Call it from a repo with a thin wrapper:
+#
+#   on:
+#     schedule:
+#       - cron: "0 3 * * 1"
+#     workflow_dispatch: {}
+#   permissions:
+#     contents: write
+#     pull-requests: write
+#   jobs:
+#     remediate:
+#       uses: Nox-HQ/.github/.github/workflows/nox-remediate.yml@main
+#       secrets: inherit
+#
+# Bump nox-version / nox-sha256 here once; every caller picks it up.
+on:
+  workflow_call:
+    inputs:
+      nox-version:
+        description: "nox release version (no leading v)."
+        type: string
+        default: "1.13.6"
+      nox-sha256:
+        description: "sha256 of nox_<version>_linux_amd64.tar.gz (verify on bump)."
+        type: string
+        default: "61933fba5bfcf4f0c0916f07c8770a55f2876856fa7c7bdec92fd471e80ba1eb"
+      include-major:
+        description: "Allow major-version bumps (off by default; majors are surfaced but held)."
+        type: boolean
+        default: false
+      verify-cmd:
+        description: "Command run after applying upgrades. Empty skips verification."
+        type: string
+        default: "go test ./... -count=1"
+    secrets:
+      # nox:ignore IAC-351 -- declares a secret INPUT; the value is never in this file
+      NOX_TOKEN:
+        description: >-
+          PAT with contents + pull-requests + workflows write. Required to push
+          remediation of .github/workflows/* — the default GITHUB_TOKEN cannot,
+          and GitHub does not expose that scope through the `permissions:` block.
+          Falls back to GITHUB_TOKEN, which still covers dependency-only
+          remediation.
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: nox-remediate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          # Action-pin remediation edits files under .github/workflows, which
+          # GitHub refuses to accept from the default GITHUB_TOKEN:
+          #
+          #   ! [remote rejected] refusing to allow a GitHub App to create or
+          #     update workflow `.github/workflows/ci.yml` without `workflows`
+          #     permission
+          #
+          # Dependabot is privileged to do this; a self-hosted workflow is not.
+          # NOX_TOKEN carries the scope; without it the run still remediates
+          # dependencies and simply leaves action pins alone.
+          token: ${{ secrets.NOX_TOKEN || github.token }}
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: stable
+
+      - name: Install nox (pinned + sha256-verified)
+        env:
+          NOX_VERSION: ${{ inputs.nox-version }}
+          NOX_SHA256: ${{ inputs.nox-sha256 }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/nox-hq/nox/releases/download/v${NOX_VERSION}/nox_${NOX_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL "$url" -o nox.tgz
+          echo "${NOX_SHA256}  nox.tgz" | sha256sum -c -
+          sudo tar xzf nox.tgz -C /usr/local/bin nox
+          rm nox.tgz
+
+      - name: Scan and remediate
+        env:
+          # `nox fix --actions` resolves each action's latest release through the
+          # GitHub API — 60 requests/hour unauthenticated, which a real workflow
+          # directory exhausts.
+          GITHUB_TOKEN: ${{ secrets.NOX_TOKEN || secrets.GITHUB_TOKEN }}
+          INCLUDE_MAJOR: ${{ inputs.include-major }}
+        run: |
+          # A scan that finds something exits non-zero; that is the normal case
+          # here and is not an error.
+          nox scan . -format json -output . || true
+          major=""
+          [ "$INCLUDE_MAJOR" = "true" ] && major="--include-major"
+          nox fix --actions $major --input findings.json --root . || true
+          [ -f go.mod ] && go mod tidy || true
+          rm -f findings.json
+
+      - name: Verify
+        # Runs before the PR is opened so reviewers never receive an untested
+        # upgrade. A failure here fails the run and opens nothing, which is the
+        # intended outcome: the upgrade broke something and a human should see
+        # the logs rather than a green PR.
+        if: inputs.verify-cmd != ''
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "nox: nothing changed; skipping verification."
+            exit 0
+          fi
+          ${{ inputs.verify-cmd }}
+
+      - name: Open remediation PR if anything changed
+        env:
+          GH_TOKEN: ${{ secrets.NOX_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "nox: nothing to remediate."
+            exit 0
+          fi
+          branch="nox/remediate-${{ github.run_id }}"
+          git config user.name "nox-remediate"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "chore(security): nox remediation (deps + actions)"
+          git push -u origin "$branch"
+          # `gh pr create --label` hard-fails when the label is absent, opening
+          # no PR at all. --force is idempotent: creates or updates, never errors.
+          gh label create dependencies \
+            --color 0366d6 \
+            --description "Pull requests that update a dependency file" \
+            --force >/dev/null 2>&1 || true
+          gh pr create \
+            --title "chore(security): nox remediation" \
+            --body "Automated remediation by \`nox fix --actions\`: OSV-vulnerable dependency upgrades, plus outdated and mutable GitHub Actions pins rewritten to their SHA-pinned latest release. Verified with \`${{ inputs.verify-cmd }}\` before opening." \
+            --label dependencies
