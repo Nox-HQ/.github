@@ -38,6 +38,17 @@ on:
         description: "Allow major-version bumps (off by default; majors are surfaced but held)."
         type: boolean
         default: false
+      content-fixes:
+        description: >-
+          Also rewrite mechanically-fixable IaC misconfigurations in place
+          (privileged: true -> false, runAsNonRoot: false -> true, and 12 more
+          such rules). Off by default: unlike a version bump, this edits
+          infrastructure that is already deployed and running, and "insecure"
+          is sometimes load-bearing — a privileged container may be a CNI
+          plugin that stops working the moment the flag flips. Opt in per repo,
+          once you know a failing verify-cmd will catch it.
+        type: boolean
+        default: false
       verify-cmd:
         description: "Command run after applying upgrades. Empty skips verification."
         type: string
@@ -103,6 +114,7 @@ jobs:
           # directory exhausts.
           GITHUB_TOKEN: ${{ secrets.NOX_TOKEN || secrets.GITHUB_TOKEN }}
           INCLUDE_MAJOR: ${{ inputs.include-major }}
+          CONTENT_FIXES: ${{ inputs.content-fixes }}
           HAVE_NOX_TOKEN: ${{ secrets.NOX_TOKEN != '' }}
         run: |
           # Scan output goes to RUNNER_TEMP, never the working tree.
@@ -142,6 +154,35 @@ jobs:
             echo "nox: GitHub Action pins are left untouched; GITHUB_TOKEN cannot push workflow file changes." >&2
           fi
           nox fix $actions $major --input "$out/findings.json" --root . || true
+
+          # The IaC content pass is a SECOND invocation, not another flag on the
+          # line above. `--content` short-circuits inside nox fix: the content
+          # code path returns before the dependency and action passes run, so
+          # `nox fix --actions --content` silently does content only and drops
+          # the upgrades the previous line would have made. Two commands is not
+          # redundancy here, it is the only ordering that produces both.
+          #
+          # Deliberately NOT gated on HAVE_NOX_TOKEN. The action-pin gate exists
+          # because --actions writes under .github/workflows and GITHUB_TOKEN is
+          # refused when pushing those; --content only touches Kubernetes,
+          # Terraform, Docker and Compose files, which the default token pushes
+          # fine. Gating it would disable IaC remediation on every repo that has
+          # no PAT, for a permission it never needs.
+          #
+          # --write, because bare --content only prints the diff and exits 0 —
+          # the run would then reach the PR step with an empty working tree and
+          # report "nothing to remediate" while the misconfiguration stays live.
+          # Reuses the same findings.json: a re-scan would be a second full pass
+          # over the tree for input nox already has on disk.
+          #
+          # `|| true` for the same reason as the line above: a failure in the
+          # content pass must not throw away the dependency upgrades already
+          # applied to the working tree. Verify and the PR step both handle an
+          # unchanged tree, so the worst case is a smaller PR, not a lost run.
+          if [ "$CONTENT_FIXES" = "true" ]; then
+            nox fix --content --write --input "$out/findings.json" --root . || true
+          fi
+
           [ -f go.mod ] && go mod tidy || true
 
       - name: Verify
@@ -160,17 +201,28 @@ jobs:
       - name: Open remediation PR if anything changed
         env:
           GH_TOKEN: ${{ secrets.NOX_TOKEN || github.token }}
+          CONTENT_FIXES: ${{ inputs.content-fixes }}
         run: |
           set -euo pipefail
           if git diff --quiet && git diff --cached --quiet; then
             echo "nox: nothing to remediate."
             exit 0
           fi
+          # A PR that says "deps + actions" while also rewriting a securityContext
+          # gets reviewed as a version bump — skimmed, approved. Name the IaC pass
+          # in the title and body whenever it ran, so the diff a reviewer expects
+          # is the diff they get.
+          scope="deps + actions"
+          content_note=""
+          if [ "$CONTENT_FIXES" = "true" ]; then
+            scope="deps + actions + IaC"
+            content_note=" Also includes deterministic IaC content fixes (\`nox fix --content --write\`): mechanical misconfiguration rewrites such as \`privileged: true\` -> \`false\`. These edit infrastructure that may already be deployed — review them as config changes, not as dependency bumps."
+          fi
           branch="nox/remediate-${{ github.run_id }}"
           git config user.name "nox-remediate"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git commit -am "chore(security): nox remediation (deps + actions)"
+          git commit -am "chore(security): nox remediation ($scope)"
           git push -u origin "$branch"
           # `gh pr create --label` hard-fails when the label is absent, opening
           # no PR at all. --force is idempotent: creates or updates, never errors.
@@ -179,6 +231,6 @@ jobs:
             --description "Pull requests that update a dependency file" \
             --force >/dev/null 2>&1 || true
           gh pr create \
-            --title "chore(security): nox remediation" \
-            --body "Automated remediation by \`nox fix --actions\`: OSV-vulnerable dependency upgrades, plus outdated and mutable GitHub Actions pins rewritten to their SHA-pinned latest release. Verified with \`${{ inputs.verify-cmd }}\` before opening." \
+            --title "chore(security): nox remediation ($scope)" \
+            --body "Automated remediation by \`nox fix --actions\`: OSV-vulnerable dependency upgrades, plus outdated and mutable GitHub Actions pins rewritten to their SHA-pinned latest release.${content_note} Verified with \`${{ inputs.verify-cmd }}\` before opening." \
             --label dependencies
