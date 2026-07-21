@@ -104,14 +104,25 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.NOX_TOKEN || secrets.GITHUB_TOKEN }}
           INCLUDE_MAJOR: ${{ inputs.include-major }}
         run: |
+          # Scan output goes to RUNNER_TEMP, never the working tree.
+          #
+          # `-output .` writes findings.json, ai.inventory.json and friends into
+          # the repository root. The commit below stages tracked modifications,
+          # so once any of those files has been committed even once it is
+          # refreshed and re-committed by every subsequent run. That is already
+          # happening upstream: findings.json rides along in nomi and dispatch
+          # remediation PRs, ai.inventory.json in senat-os — all auto-merged.
+          # Writing outside the tree makes it impossible rather than tidying up
+          # afterwards, which only ever covers the filenames someone remembered.
+          out="${RUNNER_TEMP}/nox-scan"
+          mkdir -p "$out"
           # A scan that finds something exits non-zero; that is the normal case
           # here and is not an error.
-          nox scan . -format json -output . || true
+          nox scan . -format json -output "$out" || true
           major=""
           [ "$INCLUDE_MAJOR" = "true" ] && major="--include-major"
-          nox fix --actions $major --input findings.json --root . || true
+          nox fix --actions $major --input "$out/findings.json" --root . || true
           [ -f go.mod ] && go mod tidy || true
-          rm -f findings.json
 
       - name: Verify
         # Runs before the PR is opened so reviewers never receive an untested
