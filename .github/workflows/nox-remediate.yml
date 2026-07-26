@@ -29,11 +29,11 @@ on:
       nox-version:
         description: "nox release version (no leading v)."
         type: string
-        default: "1.13.6"
+        default: "1.20.0"
       nox-sha256:
         description: "sha256 of nox_<version>_linux_amd64.tar.gz (verify on bump)."
         type: string
-        default: "61933fba5bfcf4f0c0916f07c8770a55f2876856fa7c7bdec92fd471e80ba1eb"
+        default: "e8b1ece2967ba670ff6d9dced0a67e5c0b7449e61d852e151a9e4c7d853915f3"
       include-major:
         description: "Allow major-version bumps (off by default; majors are surfaced but held)."
         type: boolean
@@ -49,6 +49,18 @@ on:
           once you know a failing verify-cmd will catch it.
         type: boolean
         default: false
+      outdated-fixes:
+        description: >-
+          Also upgrade dependencies that are merely out of date, not just those
+          with a vulnerability. `nox fix` on its own acts only on VULN-001
+          findings, so an outdated-but-not-vulnerable package is never touched;
+          this is the pass that keeps the fleet current. ON by default because
+          it replaces Dependabot's version updates, which ran on every repo:
+          defaulting it off would leave a repo with no currency updates at all
+          and nothing reporting that fact. A bump that breaks the build is
+          caught by verify-cmd before any PR is opened.
+        type: boolean
+        default: true
       verify-cmd:
         description: "Command run after applying upgrades. Empty skips verification."
         type: string
@@ -115,6 +127,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.NOX_TOKEN || secrets.GITHUB_TOKEN }}
           INCLUDE_MAJOR: ${{ inputs.include-major }}
           CONTENT_FIXES: ${{ inputs.content-fixes }}
+          OUTDATED_FIXES: ${{ inputs.outdated-fixes }}
           HAVE_NOX_TOKEN: ${{ secrets.NOX_TOKEN != '' }}
         run: |
           # Scan output goes to RUNNER_TEMP, never the working tree.
@@ -181,6 +194,25 @@ jobs:
           # unchanged tree, so the worst case is a smaller PR, not a lost run.
           if [ "$CONTENT_FIXES" = "true" ]; then
             nox fix --content --write --input "$out/findings.json" --root . || true
+          fi
+
+          # THIRD invocation, for the same reason --content is a second one:
+          # --outdated short-circuits inside nox fix exactly as --content does,
+          # returning before the dependency and Action passes. Adding it to
+          # either line above would silently do the currency pass ONLY and drop
+          # the upgrades that line was there to make.
+          #
+          # This is the currency pass, and it is a different question from
+          # everything above it: `nox fix` acts on VULN-001 findings, so it
+          # moves a dependency only when there is a vulnerability. A package
+          # that is merely old is never touched, which is why every plugin repo
+          # sat on nox v1.17.0 while this workflow ran green each week.
+          #
+          # Takes no findings.json: it is not acting on a finding. Needs the
+          # network to ask what is newer, which is why nox keeps it behind an
+          # explicit flag and out of `scan`.
+          if [ "$OUTDATED_FIXES" = "true" ]; then
+            nox fix --outdated $major --root . || true
           fi
 
           [ -f go.mod ] && go mod tidy || true
