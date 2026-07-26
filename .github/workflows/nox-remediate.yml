@@ -29,11 +29,11 @@ on:
       nox-version:
         description: "nox release version (no leading v)."
         type: string
-        default: "1.20.0"
+        default: "1.21.0"
       nox-sha256:
         description: "sha256 of nox_<version>_linux_amd64.tar.gz (verify on bump)."
         type: string
-        default: "e8b1ece2967ba670ff6d9dced0a67e5c0b7449e61d852e151a9e4c7d853915f3"
+        default: "3cebe42ff3c7b2ef462ee500737be87b93833ee166c171f3751075f81e53861f"
       include-major:
         description: "Allow major-version bumps (off by default; majors are surfaced but held)."
         type: boolean
@@ -54,7 +54,8 @@ on:
           Also upgrade dependencies that are merely out of date, not just those
           with a vulnerability. `nox fix` on its own acts only on VULN-001
           findings, so an outdated-but-not-vulnerable package is never touched;
-          this is the pass that keeps the fleet current. ON by default because
+          this is the pass that keeps the fleet current. As of nox 1.21.0 it
+          covers Go, npm, PyPI, Cargo, RubyGems, Composer and NuGet. ON by default because
           it replaces Dependabot's version updates, which ran on every repo:
           defaulting it off would leave a repo with no currency updates at all
           and nothing reporting that fact. A bump that breaks the build is
