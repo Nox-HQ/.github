@@ -78,9 +78,16 @@ jobs:
         run: |
           tar -czf "${{ steps.digest.outputs.binary }}.tar.gz" "${{ steps.digest.outputs.binary }}"
 
+      # `secrets` is not available in an `if:` expression — using it there is a
+      # workflow VALIDATION error, so the whole file fails to start and the run
+      # reports zero jobs with no log to read. The supported shape is to map the
+      # secret into `env` (which does allow the secrets context) and test that,
+      # which is what nox-remediate.yml in this repo already does via
+      # HAVE_NOX_TOKEN.
       - name: Sign artifact
-        if: ${{ secrets.NOX_SIGNING_KEY != '' }}
+        if: env.HAVE_SIGNING_KEY == 'true'
         env:
+          HAVE_SIGNING_KEY: ${{ secrets.NOX_SIGNING_KEY != '' }}
           NOX_SIGNING_KEY: ${{ secrets.NOX_SIGNING_KEY }}
         run: |
           echo "${NOX_SIGNING_KEY}" | base64 -d > /tmp/signing-key.pem
@@ -135,8 +142,9 @@ jobs:
           EOF
 
       - name: Dispatch registry update
-        if: ${{ secrets.REGISTRY_DISPATCH_TOKEN != '' }}
+        if: env.HAVE_DISPATCH_TOKEN == 'true'
         env:
+          HAVE_DISPATCH_TOKEN: ${{ secrets.REGISTRY_DISPATCH_TOKEN != '' }}
           GH_TOKEN: ${{ secrets.REGISTRY_DISPATCH_TOKEN }}
         run: |
           gh api repos/${{ inputs.registry-repo }}/dispatches \
