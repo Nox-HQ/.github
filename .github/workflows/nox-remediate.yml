@@ -263,7 +263,35 @@ jobs:
             --color 0366d6 \
             --description "Pull requests that update a dependency file" \
             --force >/dev/null 2>&1 || true
-          gh pr create \
+          url="$(gh pr create \
             --title "chore(security): nox remediation ($scope)" \
             --body "Automated remediation by \`nox fix --actions\`: OSV-vulnerable dependency upgrades, plus outdated and mutable GitHub Actions pins rewritten to their SHA-pinned latest release.${content_note} Verified with \`${{ inputs.verify-cmd }}\` before opening." \
-            --label dependencies
+            --label dependencies)"
+
+          # Land it. Without this the workflow opened a PR and stopped, and
+          # nothing downstream ever merged one: on 2026-08-02 all 15 open
+          # remediation PRs across the Nox-HQ plugin repos had been sitting
+          # unmerged, the oldest since 27 July. Security remediation was being
+          # generated faithfully every week and then abandoned.
+          #
+          # Auto-merge first, which is the right mechanism where the repo has
+          # required checks to wait on. Nox-HQ plugin repos currently have no
+          # branch protection, so GitHub rejects --auto there — for those, wait
+          # for the PR's own checks and merge only if they pass. The content was
+          # already verified with `${{ inputs.verify-cmd }}` before the PR was
+          # opened; this is the second, independent confirmation, and skipping
+          # it to "just merge" would make this workflow the one path into main
+          # that no CI ever gated.
+          if gh pr merge --auto --squash "$url" 2>/dev/null; then
+            echo "nox: auto-merge enabled; will land once required checks pass."
+            exit 0
+          fi
+
+          echo "nox: no required checks for auto-merge to wait on; watching this PR's checks instead."
+          if gh pr checks "$url" --watch --fail-fast --interval 20 >/dev/null 2>&1; then
+            gh pr merge --squash --delete-branch "$url" \
+              && echo "nox: remediation merged." \
+              || echo "::warning::Checks passed but the merge was refused. Needs a manual merge: ${url}"
+          else
+            echo "::warning::Remediation PR opened but its checks did not pass, so it was not merged. It needs a look: ${url}"
+          fi
