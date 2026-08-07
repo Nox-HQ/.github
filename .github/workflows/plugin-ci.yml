@@ -18,6 +18,26 @@ on:
         required: false
         type: boolean
         default: true
+      nox-scan:
+        description: 'Scan the plugin repo with nox itself. On by default: a plugin repo that ships security analysis should not be the one repo nobody analyses.'
+        required: false
+        type: boolean
+        default: true
+      nox-cli-version:
+        description: 'nox CLI version used for the security scan (distinct from nox-version, which pins the SDK dependency).'
+        required: false
+        type: string
+        default: '1.26.0'
+      nox-cli-sha256:
+        description: 'sha256 of nox_<version>_linux_amd64.tar.gz. Bump together with nox-cli-version, verifying against the published tarball.'
+        required: false
+        type: string
+        default: '6879f8c7b523ebab9920d40919917b422bb952f9252fbadde9061cb37827793c'
+      nox-strict:
+        description: 'Fail on net-new critical/high even before the repo has adopted nox.'
+        required: false
+        type: boolean
+        default: false
     secrets:
       NOX_SIGNING_KEY:
         description: 'Ed25519 private key for artifact signing (base64)'
@@ -115,3 +135,112 @@ jobs:
           name: binary-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             *-${{ matrix.os }}-${{ matrix.arch }}
+
+  # The plugin repos publish security analysis and, until now, were the one
+  # part of the fleet nox never looked at: plugin-ci.yml ran lint, test,
+  # conformance and build, and no scan. A scanner's own supply chain is not
+  # exempt from the thing it scans for.
+  security:
+    name: Security (nox)
+    if: inputs.nox-scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nox (pinned + sha256-verified)
+        env:
+          NOX_VERSION: ${{ inputs.nox-cli-version }}
+          NOX_SHA256: ${{ inputs.nox-cli-sha256 }}
+        run: |
+          curl -sL -o nox.tar.gz \
+            "https://github.com/nox-hq/nox/releases/download/v${NOX_VERSION}/nox_${NOX_VERSION}_linux_amd64.tar.gz"
+          echo "${NOX_SHA256}  nox.tar.gz" | sha256sum -c -
+          tar xzf nox.tar.gz && sudo mv nox /usr/local/bin/ && nox version
+
+      - name: Install cosign
+        # nox shells out to cosign to verify plugin signatures. Without it a
+        # signed plugin cannot be promoted past "unverified" and install is
+        # refused under the default community-trust policy.
+        uses: sigstore/cosign-installer@v3
+
+      - name: Install required plugins
+        # Derived from plugins.required in .nox.yaml rather than a hardcoded
+        # list, which drifts from the config it exists to satisfy — silently.
+        # Installing is also not sufficient on its own: nox runs only the
+        # plugins named there, and reports the rest as [degraded] with their
+        # findings absent.
+        run: |
+          if [ ! -f .nox.yaml ]; then
+            echo "::notice::no .nox.yaml; scanning with core rules only."
+            exit 0
+          fi
+          required=$(sed -n '/^plugins:/,/^[^ ]/p' .nox.yaml | sed -n 's/^ *- *\(nox\/[a-z0-9-]*\).*/\1/p')
+          [ -z "$required" ] && { echo "::notice::.nox.yaml declares no required plugins."; exit 0; }
+          echo "required: $required"
+          for p in $required; do
+            nox plugin install "$p"
+            nox plugin list | grep -q "^${p} " || {
+              echo "::error::${p} is required by .nox.yaml but is not installed; this scan would silently omit its findings."
+              exit 1
+            }
+          done
+
+      - name: Scan
+        # A required plugin that is missing is reported as [degraded] and still
+        # exits 0, so the output has to be inspected: a scan that omitted a
+        # whole analysis must not read as one that found nothing.
+        run: |
+          set -o pipefail
+          nox scan . -format json,sarif -output nox-results 2>&1 | tee nox-scan.log || true
+          if grep -q 'required plugin .* is not installed' nox-scan.log; then
+            echo "::error::nox ran degraded — a required plugin did not run and its findings are absent."
+            grep 'required plugin' nox-scan.log
+            exit 1
+          fi
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('nox-results/results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: nox-results/results.sarif
+
+      - name: Gate on net-new critical/high findings
+        # Report-only until the repo has adopted nox (or nox-strict is set).
+        # The ramp keys on adoption, not on how many findings are baselined:
+        # a repo that waives everything inline never accumulates baseline
+        # entries, and keying on that count left such repos reporting forever.
+        if: always() && hashFiles('nox-results/findings.json') != ''
+        env:
+          NOX_STRICT: ${{ inputs.nox-strict }}
+        run: |
+          f=nox-results/findings.json
+          # baselined and suppressed are both explicit waivers — one via
+          # .nox/baseline.json, the other via a nox:ignore directive at the
+          # site. A finding is live only when it carries no status at all.
+          waived=$(jq '[.findings[]? | select(.Status=="baselined" or .Status=="suppressed")] | length' "$f" 2>/dev/null || echo 0)
+          new=$(jq '[.findings[]? | select((.Severity=="critical" or .Severity=="high") and ((.Status // "") == ""))] | length' "$f" 2>/dev/null || echo 0)
+          echo "net-new critical/high: $new (waived findings: $waived)"
+          adopted=false
+          if [ -f .nox.yaml ] || [ -d .nox ] || [ "$waived" -gt 0 ]; then
+            adopted=true
+          fi
+          if [ "$adopted" != "true" ] && [ "$NOX_STRICT" != "true" ]; then
+            echo "::notice::No nox configuration or baseline found — security gate is report-only. Commit a .nox.yaml to enforce net-new critical/high."
+            exit 0
+          fi
+          if [ "$new" -gt 0 ]; then
+            echo "::error::Net-new critical/high findings. Remediate, waive at the site with a nox:ignore directive stating why, or run 'nox baseline add'."
+            jq '.findings[] | select((.Severity=="critical" or .Severity=="high") and ((.Status // "") == "")) | {severity:.Severity, rule:.RuleID, file:.Location.FilePath, line:.Location.StartLine}' "$f"
+            exit 1
+          fi
+
+      - name: Upload nox artifacts
+        if: always() && hashFiles('nox-results/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: nox-results
+          path: nox-results/
+          retention-days: 7
