@@ -29,11 +29,11 @@ on:
       nox-version:
         description: "nox release version (no leading v)."
         type: string
-        default: "1.21.0"
+        default: "1.27.0"
       nox-sha256:
         description: "sha256 of nox_<version>_linux_amd64.tar.gz (verify on bump)."
         type: string
-        default: "3cebe42ff3c7b2ef462ee500737be87b93833ee166c171f3751075f81e53861f"
+        default: "02a6f01575ab959ab971528bdef7d6e0a4c9a7b5c70298b802f1031c77304c5a"
       include-major:
         description: "Allow major-version bumps (off by default; majors are surfaced but held)."
         type: boolean
@@ -216,7 +216,23 @@ jobs:
             nox fix --outdated $major --root . || true
           fi
 
+          # Record whether the nox passes above changed anything, BEFORE tidy
+          # runs. `go mod tidy` is not remediation — it moves requirements
+          # between the direct and indirect blocks and fills in missing go.sum
+          # lines — but the PR step below could not tell the two apart, so a
+          # tidy-only diff was committed as "chore(security): nox remediation
+          # (deps + actions)". $scope named the passes that were ENABLED, not
+          # the ones that changed something, so it read the same either way.
+          # klarlabs-studio/warden#202 is that PR: a security title over a diff
+          # containing no version change at all.
+          empty="$(printf '' | sha256sum | cut -d' ' -f1)"
+          after_fix="$(git diff HEAD | sha256sum | cut -d' ' -f1)"
+          [ "$after_fix" != "$empty" ] && echo "remediated=true" >> "$GITHUB_ENV" || echo "remediated=false" >> "$GITHUB_ENV"
+
           [ -f go.mod ] && go mod tidy || true
+
+          after_tidy="$(git diff HEAD | sha256sum | cut -d' ' -f1)"
+          [ "$after_tidy" != "$after_fix" ] && echo "tidied=true" >> "$GITHUB_ENV" || echo "tidied=false" >> "$GITHUB_ENV"
 
       - name: Verify
         # Runs before the PR is opened so reviewers never receive an untested
@@ -245,17 +261,35 @@ jobs:
           # gets reviewed as a version bump — skimmed, approved. Name the IaC pass
           # in the title and body whenever it ran, so the diff a reviewer expects
           # is the diff they get.
+          #
+          # $scope named the passes that were ENABLED, though, not the ones that
+          # changed something — so a run where every nox pass found nothing and
+          # only `go mod tidy` moved a line still read "chore(security): nox
+          # remediation (deps + actions)" over a body promising OSV upgrades.
+          # $remediated, set by the step above from the diff either side of tidy,
+          # is the question that actually distinguishes them.
           scope="deps + actions"
           content_note=""
           if [ "$CONTENT_FIXES" = "true" ]; then
             scope="deps + actions + IaC"
             content_note=" Also includes deterministic IaC content fixes (\`nox fix --content --write\`): mechanical misconfiguration rewrites such as \`privileged: true\` -> \`false\`. These edit infrastructure that may already be deployed — review them as config changes, not as dependency bumps."
           fi
+          tidy_note=""
+          [ "$tidied" = "true" ] && tidy_note=" \`go mod tidy\` also ran and adjusted go.mod/go.sum."
+          if [ "$remediated" = "true" ]; then
+            title="chore(security): nox remediation ($scope)"
+            body="Automated remediation by \`nox fix --actions\`: OSV-vulnerable dependency upgrades, plus outdated and mutable GitHub Actions pins rewritten to their SHA-pinned latest release.${content_note}${tidy_note} Verified with \`${{ inputs.verify-cmd }}\` before opening."
+          else
+            title="chore(deps): go mod tidy"
+            body="$(printf '%s\n\n%s' \
+              '`nox fix` found nothing to remediate — **no vulnerability is being fixed here, and no action pin changed.** What the diff contains is `go mod tidy`: requirements moving between the direct and indirect blocks, and missing go.sum lines filled in. The branch was simply not tidy.' \
+              'The honest title is deliberate. This run would previously have been titled `chore(security): nox remediation` with a body claiming OSV upgrades, because the workflow could not tell its own remediation apart from the tidy pass that follows it.')"
+          fi
           branch="nox/remediate-${{ github.run_id }}"
           git config user.name "nox-remediate"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$branch"
-          git commit -am "chore(security): nox remediation ($scope)"
+          git commit -am "$title"
           git push -u origin "$branch"
           # `gh pr create --label` hard-fails when the label is absent, opening
           # no PR at all. --force is idempotent: creates or updates, never errors.
@@ -264,8 +298,8 @@ jobs:
             --description "Pull requests that update a dependency file" \
             --force >/dev/null 2>&1 || true
           url="$(gh pr create \
-            --title "chore(security): nox remediation ($scope)" \
-            --body "Automated remediation by \`nox fix --actions\`: OSV-vulnerable dependency upgrades, plus outdated and mutable GitHub Actions pins rewritten to their SHA-pinned latest release.${content_note} Verified with \`${{ inputs.verify-cmd }}\` before opening." \
+            --title "$title" \
+            --body "$body" \
             --label dependencies)"
 
           # Land it. Without this the workflow opened a PR and stopped, and
