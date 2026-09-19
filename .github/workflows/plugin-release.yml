@@ -1,3 +1,9 @@
+# DEPRECATED, and not verifiable by the official registry. This workflow signs
+# with Ed25519 (NOX_SIGNING_KEY); the registry verifies keyless cosign bundles
+# produced by GoReleaser. `nox plugin init` no longer generates a reference to
+# it -- plugins carry their own release.yml and .goreleaser.yaml (nox
+# docs/plugin-authoring.md, "Distribution"). Kept only so plugins scaffolded
+# before nox v1.38.3 do not break outright; every run warns.
 name: Plugin Release
 
 on:
@@ -45,6 +51,8 @@ jobs:
             goarch: arm64
 
     steps:
+      - name: Deprecation notice
+        run: echo "::warning title=Deprecated shared workflow::nox-hq/.github plugin-release.yml is deprecated. Run 'nox plugin init' (nox >= 1.38.3) in a scratch directory and copy its .github/workflows and .goreleaser.yaml into this repository; see https://github.com/nox-hq/nox/blob/main/docs/plugin-authoring.md#distribution"
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
