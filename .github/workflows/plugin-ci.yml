@@ -35,23 +35,23 @@ jobs:
     steps:
       - name: Deprecation notice
         run: echo "::warning title=Deprecated shared workflow::nox-hq/.github plugin-ci.yml is deprecated. Run 'nox plugin init' (nox >= 1.38.3) in a scratch directory and copy its .github/workflows and .goreleaser.yaml into this repository; see https://github.com/nox-hq/nox/blob/main/docs/plugin-authoring.md#distribution"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ inputs.go-version }}
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
         with:
           version: v2.12.2
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ inputs.go-version }}
 
@@ -60,7 +60,7 @@ jobs:
 
       - name: Upload coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage
           path: coverage.out
@@ -69,9 +69,9 @@ jobs:
     if: ${{ inputs.run-conformance }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ inputs.go-version }}
 
@@ -101,9 +101,9 @@ jobs:
             goos: darwin
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ inputs.go-version }}
 
@@ -118,7 +118,7 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o "${OUTPUT}" .
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4 # nox:ignore IAC-153 -- passes the CI build between jobs; nothing is published from it
         with:
           name: binary-${{ matrix.os }}-${{ matrix.arch }}
           path: |
